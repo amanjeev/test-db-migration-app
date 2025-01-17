@@ -27,10 +27,9 @@ struct DBBots {
     thoughts: String,
 }
 
-async fn run_database_migration() -> Result<(), Error> {
-    let url: String = "postgres://postgres:postgres@localhost:5432/dbmigration".to_string();
+async fn run_database_migration(url: &str) -> Result<(), Error> {
     println!("Running database migration on {url}...");
-    let db_pool = PgPool::connect(url.as_str())
+    let db_pool = PgPool::connect(url)
         .await
         .context("Failed to connect to database")?;
 
@@ -40,43 +39,46 @@ async fn run_database_migration() -> Result<(), Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    let db_connection_str = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/dbmigration".to_string());
+    tracing::info!("DB Connection String: {}", db_connection_str);
+
     let cli = Cli::parse();
     match &cli.command {
-        Some(Commands::RunMigrations) => run_database_migration().await,
-        None => run_server().await,
+        Some(Commands::RunMigrations) => run_database_migration(&db_connection_str).await,
+        None => run_server(&db_connection_str).await,
     }
 }
 
-async fn run_server() -> Result<(), Error> {
-    let db_connection_str = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/dbmigration".to_string());
+async fn run_server(url: &str) -> Result<(), Error> {
     let env = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "DEV".to_string());
+    tracing::info!("ENV: {}", env);
+
+    let local_ip = match env.as_str() {
+        "PROD" => Ipv4Addr::new(0, 0, 0, 0),
+        _ => Ipv4Addr::new(127, 0, 0, 1),
+    };
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
-        .parse()
-        .unwrap();
+        .parse()?;
+    tracing::info!("Local IP {}: Port {}", local_ip, port);
 
     // set up connection pool
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(3))
-        .connect(&db_connection_str)
+        .connect(url)
         .await
         .expect("can't connect to database");
 
     // build our application with some routes
     let app = Router::new().route("/", get(show_stuff)).with_state(pool);
 
-    let local_ip = match env.as_str() {
-        "PROD" => Ipv4Addr::new(0, 0, 0, 0),
-        _ => Ipv4Addr::new(127, 0, 0, 1),
-    };
-
     let address = SocketAddr::new(IpAddr::from(local_ip), port);
-    let listener = TcpListener::bind(address).await.unwrap();
+    let listener = TcpListener::bind(address).await?;
 
-    tracing::debug!("listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+    tracing::debug!("listening on {}", listener.local_addr()?);
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
